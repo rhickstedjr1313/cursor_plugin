@@ -1,0 +1,136 @@
+# Installation Guide for Running a DeepSeek AI Server on macOS (Apple Silicon)
+
+## 1️⃣ Prerequisites
+### Required Software
+Ensure you have the following installed:
+- **Homebrew (if not installed, install with):**
+  ```bash
+  /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+  ```
+- **Python 3.9+ (check version with):**
+  ```bash
+  python3 --version
+  ```
+  If Python is missing or outdated, install it via Homebrew:
+  ```bash
+  brew install python
+  ```
+
+- **Pip (ensure it is updated)**
+  ```bash
+  python3 -m pip install --upgrade pip
+  ```
+
+## 2️⃣ Set Up Environment Variables
+### Create and Set MLX Backend for Apple Silicon
+MLX (Machine Learning Accelerator) is optimized for Apple Metal. To enable it:
+1. **Create an environment script:**
+   ```bash
+   cd ~/server  # Change to your project directory
+   touch server_env.sh
+   ```
+2. **Edit the file (`server_env.sh`) and add:**
+   ```bash
+   export MLX_BACKEND=metal
+   ```
+3. **Apply the environment settings:**
+   ```bash
+   chmod 755 ./server_env.sh
+   ./server_env.sh
+   ```
+4. **Verify the environment variable is set:**
+   ```bash
+   echo $MLX_BACKEND
+   ```
+   Expected output: `metal`
+
+## 3️⃣ Install Required Python Packages
+### Install Dependencies
+```bash
+pip3 install torch transformers fastapi uvicorn mlx mlx-lm accelerate
+```
+
+### Fix PATH Issues for Uvicorn & Python Scripts
+You might see warnings like:
+```
+WARNING: The script uvicorn is installed in '/Users/rickhicksted/Library/Python/3.9/bin' which is not on PATH.
+```
+Fix this by adding it to the **PATH**:
+```bash
+echo 'export PATH=$PATH:/Users/rickhicksted/Library/Python/3.9/bin' >> ~/.zshrc
+source ~/.zshrc
+```
+Verify installation:
+```bash
+which uvicorn
+```
+Expected output:
+```
+/Users/rickhicksted/Library/Python/3.9/bin/uvicorn
+```
+
+## 4️⃣ Create and Run the DeepSeek AI Server
+### Download the `server.py` File
+Instead of manually creating the file, you can download the latest version:
+```bash
+curl -o server.py "sandbox:/mnt/data/server.py"
+```
+
+### Start the Server
+```bash
+uvicorn server:app --host 0.0.0.0 --port 8000
+```
+
+### Expected Output
+If successful, you should see:
+```
+Loading model...
+Model loaded successfully!
+INFO:     Started server process [PID]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+```
+
+## 5️⃣ Test the API
+### Using Curl
+```bash
+curl -X 'POST' 'http://localhost:8000/generate'      -H 'Content-Type: application/json'      -d '{"prompt": "What is DeepSeek AI?", "max_tokens": 50}'
+```
+
+## 6️⃣ Common Issues & Fixes
+### `uvicorn: command not found`
+Fix:
+```bash
+export PATH=$PATH:/Users/rickhicksted/Library/Python/3.9/bin
+```
+
+### `ImportError: Using low_cpu_mem_usage=True requires Accelerate`
+Fix:
+```bash
+pip install 'accelerate>=0.26.0'
+```
+
+### Slow Model Loading
+- Try running a **quantized model**:
+  ```python
+  from transformers import BitsAndBytesConfig
+
+  bnb_config = BitsAndBytesConfig(load_in_8bit=True)
+  model = AutoModelForCausalLM.from_pretrained(MODEL_NAME, quantization_config=bnb_config)
+  ```
+
+## 7️⃣ Final Summary
+✅ **Install Python, Pip, Uvicorn, and FastAPI**  
+✅ **Set environment variables for MLX (Metal backend for Apple Silicon)**  
+✅ **Install DeepSeek AI and Hugging Face libraries**  
+✅ **Run the API server with Uvicorn**  
+✅ **Test with Curl or Web UI**  
+
+Your DeepSeek AI server should now be **running on your Mac** and ready for API requests! 🚀
+
+### **Download This Installation Guide**
+To download this guide as a text file, run:
+```bash
+curl -o deepseek_installation_guide.txt "sandbox:/mnt/data/deepseek_installation_guide_updated.txt"
+```

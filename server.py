@@ -1,4 +1,5 @@
 import os
+import time
 from fastapi import FastAPI
 from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -38,9 +39,13 @@ class RequestBody(BaseModel):
 
 @app.post("/generate")
 async def generate_text(request: RequestBody):
-    """Generates text using DeepSeek AI."""
+    """Generates text using DeepSeek AI and logs request & inference time."""
+    
+    total_start_time = time.time()  # Start timing full request
+
     inputs = tokenizer(request.prompt, return_tensors="pt").to("mps")  # Apple GPU (MPS backend)
 
+    model_start_time = time.time()  # Start timing model inference
     with torch.no_grad():
         outputs = model.generate(
             **inputs,
@@ -48,9 +53,24 @@ async def generate_text(request: RequestBody):
             temperature=0.7,  # Adjust as needed
             top_p=0.9
         )
+    model_end_time = time.time()  # End timing model inference
 
     response_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    return {"response": response_text}
+    total_end_time = time.time()  # End timing full request
+
+    model_time = model_end_time - model_start_time
+    total_time = total_end_time - total_start_time
+
+    print(f"🕒 Model Inference Time: {model_time:.4f} seconds")
+    print(f"⏳ Total Request Time: {total_time:.4f} seconds")
+
+    return {
+        "response": response_text,
+        "timing": {
+            "model_inference_time": model_time,
+            "total_request_time": total_time
+        }
+    }
 
 @app.get("/")
 def home():

@@ -1,77 +1,125 @@
+# server.py
+
 import os
 import time
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from transformers import AutoModelForCausalLM, AutoTokenizer
-import mlx.core as mx
 import torch
+from pymongo import MongoClient
 
-# Set MLX to use GPU
-mx.set_default_device(mx.gpu)
+MODELS = {
+    "deepseek": "deepseek-ai/deepseek-coder-7b-instruct-v1.5",  # ✅ Updated model
+    "mistral": "mistralai/Mistral-7B-Instruct-v0.3",
+    "phi3": "microsoft/Phi-3-mini-128k-instruct",
+    "gemma": "google/gemma-7b-it",
+    "mixtral": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+    "llama3-8b": "meta-llama/Meta-Llama-3-8B-Instruct"
+}
 
-# Model name from Hugging Face
-MODEL_NAME = "deepseek-ai/deepseek-llm-7b-chat"
+# MongoDB setup
+MONGO_URI = "mongodb://localhost:27017"
+client = MongoClient(MONGO_URI)
+db = client.deepseek_db
+conversations_collection = db.conversations
 
-# Define an offload folder to handle disk memory usage
-OFFLOAD_FOLDER = "./offload_weights"
-os.makedirs(OFFLOAD_FOLDER, exist_ok=True)
+def save_conversation(user_id, conversation):
+    conversations_collection.update_one(
+        {"user_id": user_id},
+        {"$set": {"conversation": conversation}},
+        upsert=True
+    )
 
-print("Loading model...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+def load_conversation(user_id):
+    user_data = conversations_collection.find_one({"user_id": user_id})
+    return user_data["conversation"] if user_data else []
 
-# Load model with FP16 precision instead of bitsandbytes
-model = AutoModelForCausalLM.from_pretrained(
-    MODEL_NAME,
-    torch_dtype=torch.float16,  # ✅ Use FP16 (works on Apple Silicon)
-    device_map="auto",
-    offload_folder=OFFLOAD_FOLDER  # Store offloaded weights here
-)
+def create_app():
+    model_name = os.environ.get("MODEL_NAME", "deepseek")
+    if model_name not in MODELS:
+        raise ValueError(f"Model '{model_name}' not available. Choose from: {', '.join(MODELS.keys())}")
+    MODEL_ID = MODELS[model_name]
 
-print("Model loaded successfully!")
+    print(f"🚀 Loading model '{model_name}' from '{MODEL_ID}'...")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_ID,
+        torch_dtype=torch.float16,
+        device_map={"": 0}  # ✅ Force full model to GPU 0
+    )
+    print("✅ Model loaded successfully!")
 
-# Initialize FastAPI
-app = FastAPI()
+    app = FastAPI()
 
-# Define request schema
-class RequestBody(BaseModel):
-    prompt: str
-    max_tokens: int = 100
+    class RequestBody(BaseModel):
+        user_id: str
+        message: str
+        max_tokens: int = 100
 
-@app.post("/generate")
-async def generate_text(request: RequestBody):
-    """Generates text using DeepSeek AI and logs request & inference time."""
-    
-    total_start_time = time.time()  # Start timing full request
+    @app.post("/generate")
+    async def generate_text(request: Request):
+        try:
+            body = await request.json()
+            print("✅ Received JSON:", body)
+        except Exception as e:
+            print("❌ Failed to parse JSON:", e)
+            return JSONResponse(status_code=400, content={"error": "Invalid JSON format", "details": str(e)})
 
-    inputs = tokenizer(request.prompt, return_tensors="pt").to("mps")  # Apple GPU (MPS backend)
+        try:
+            req = RequestBody(**body)
+        except Exception as e:
+            print("❌ Schema validation failed:", e)
+            return JSONResponse(status_code=422, content={"error": "Validation error", "details": str(e)})
 
-    model_start_time = time.time()  # Start timing model inference
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=request.max_tokens,
-            temperature=0.7,  # Adjust as needed
-            top_p=0.9
-        )
-    model_end_time = time.time()  # End timing model inference
+        user_id = req.user_id
+        conversation_history = load_conversation(user_id)
+        conversation_history.append(f"User: {req.message}")
+        conversation_history = conversation_history[-10:]
+        context = "\n".join(conversation_history) + "\nAssistant:"
+        print(f"🧠 Full context for user '{user_id}':\n{context}\n")
 
-    response_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-    total_end_time = time.time()  # End timing full request
+        total_start = time.time()
+        inputs = tokenizer(context, return_tensors="pt").to(model.device)
 
-    model_time = model_end_time - model_start_time
-    total_time = total_end_time - total_start_time
+        if inputs["input_ids"].shape[1] > 2048:
+            inputs["input_ids"] = inputs["input_ids"][:, -2048:]
+            if "attention_mask" in inputs:
+                inputs["attention_mask"] = inputs["attention_mask"][:, -2048:]
+            print("⚠️ Input truncated to 2048 tokens.")
 
-    print(f"🕒 Model Inference Time: {model_time:.4f} seconds")
-    print(f"⏳ Total Request Time: {total_time:.4f} seconds")
+        model_start = time.time()
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=req.max_tokens,
+                temperature=0.7,
+                top_p=0.9
+            )
+        model_end = time.time()
 
-    return {
-        "response": response_text,
-        "timing": {
-            "model_inference_time": model_time,
-            "total_request_time": total_time
+        response_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        total_end = time.time()
+
+        print(f"✅ Response generated in {model_end - model_start:.2f}s (Total: {total_end - total_start:.2f}s)")
+        print(f"🗣️ Assistant:\n{response_text.strip()}\n")
+
+        conversation_history.append(f"Assistant: {response_text}")
+        save_conversation(user_id, conversation_history)
+
+        return {
+            "response": response_text,
+            "timing": {
+                "model_inference_time": model_end - model_start,
+                "total_request_time": total_end - total_start
+            }
         }
-    }
 
-@app.get("/")
-def home():
-    return {"message": "DeepSeek AI Model Server is Running on macOS!"}
+    @app.get("/")
+    def home():
+        return {"message": f"{model_name} Model Server is Running with CUDA and MongoDB!"}
+
+    return app
+
+# Expose app for uvicorn
+app = create_app()

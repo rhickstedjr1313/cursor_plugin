@@ -1,63 +1,49 @@
-#!/bin/bash
+#!/usr/bin/env bash
+set -euo pipefail
+IFS=$'\n\t'
 
-echo "🚀 Starting build process for AchievAI Server on Linux..."
+echo "🚀 Starting build process for AchievAI Server (HTTP only)..."
 
-# Check for Python and pip
-if ! command -v python3 &> /dev/null || ! command -v pip &> /dev/null; then
-    echo "❌ ERROR: Python3 or pip is not installed."
-    exit 1
-fi
-
-# Set up virtual environment
+# 1) venv & activate
 if [ ! -d "venv" ]; then
-    echo "📦 Creating virtual environment..."
-    python3 -m venv venv
+  echo "📦 Creating virtual environment…"
+  python3 -m venv venv
 fi
+# shellcheck disable=SC1091
 source venv/bin/activate
 
-# Upgrade pip and install PyTorch Nightly for CUDA 12.8 (for RTX 5090 support)
-echo "📦 Installing PyTorch Nightly with CUDA 12.8 support..."
+# 2) Dependencies
+echo "📦 Installing/upgrading pip & core libraries…"
 pip install --upgrade pip
 pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
-
-# Install other required packages
-REQUIRED_PACKAGES=("uvicorn" "fastapi" "transformers" "pymongo" "accelerate")
-for package in "${REQUIRED_PACKAGES[@]}"; do
-    if ! python -c "import ${package}" &> /dev/null; then
-        echo "📦 Installing ${package}..."
-        pip install ${package}
-    fi
+for pkg in uvicorn fastapi transformers pymongo accelerate; do
+  pip install --upgrade "$pkg"
 done
 
-# Ensure server.py exists
-if [ ! -f "server.py" ]; then
-    echo "❌ ERROR: server.py not found!"
+# 3) Check server.py
+if ! grep -qE '^app\s*=\s*create_app\(\)' server.py; then
+  echo "❌ ERROR: server.py must include at top‑level: app = create_app()"
+  exit 1
+fi
+
+# 4) Ensure MongoDB is running
+if ! pgrep -x mongod &>/dev/null; then
+  echo "🚀 Starting MongoDB…"
+  sudo systemctl start mongod
+  sleep 2
+  if ! pgrep -x mongod &>/dev/null; then
+    echo "❌ ERROR: Unable to start mongod. Check 'systemctl status mongod'."
     exit 1
+  fi
 fi
-
-# Check if mongod is available
-if ! command -v mongod &> /dev/null; then
-    echo "❌ ERROR: MongoDB is not installed or not in PATH."
-    exit 1
-fi
-
-# Start MongoDB if not already running
-if ! pgrep -x "mongod" > /dev/null; then
-    echo "🚀 Starting MongoDB with systemd..."
-    sudo systemctl start mongod
-
-    sleep 2
-    if ! pgrep -x "mongod" > /dev/null; then
-        echo "❌ ERROR: MongoDB failed to start. Check with 'systemctl status mongod'"
-        exit 1
-    fi
-fi
-
 echo "✅ MongoDB is running."
 
-# Use provided model name or default to 'deepseek'
-MODEL_CHOICE=${1:-deepseek}
-export MODEL_NAME="$MODEL_CHOICE"
+# 5) Model selection
+MODEL_NAME="${1:-deepseek}"
+export MODEL_NAME
+echo "🚀 Using model: $MODEL_NAME"
 
-echo "🚀 Running AchievAI Server with model: $MODEL_CHOICE on http://localhost:8000..."
-uvicorn server:create_app --factory --host 0.0.0.0 --port 8000 --reload
+# 6) Launch HTTP only
+echo "🎧 Launching HTTP Uvicorn on port 8000…"
+uvicorn server:app \
+  --host 0.0.0.0 --port 8000 --reload

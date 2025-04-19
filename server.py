@@ -1,125 +1,159 @@
+#!/usr/bin/env python3
 # server.py
 
 import os
-import time
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
-import torch
-from pymongo import MongoClient
+import json
+from typing import List, Dict, Generator
 
+from fastapi import FastAPI, Request, HTTPException
+from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+import torch
+from transformers import AutoTokenizer, AutoModelForCausalLM
+
+# ─── Model registry ─────────────────────────────────────────────────────────────────
 MODELS = {
-    "deepseek": "deepseek-ai/deepseek-coder-7b-instruct-v1.5",  # ✅ Updated model
-    "mistral": "mistralai/Mistral-7B-Instruct-v0.3",
-    "phi3": "microsoft/Phi-3-mini-128k-instruct",
-    "gemma": "google/gemma-7b-it",
-    "mixtral": "mistralai/Mixtral-8x7B-Instruct-v0.1",
-    "llama3-8b": "meta-llama/Meta-Llama-3-8B-Instruct"
+    "deepseek":      "deepseek-ai/deepseek-coder-7b-instruct-v1.5",
+    "gpt-3.5":       "deepseek-ai/deepseek-coder-7b-instruct-v1.5",
+    "gpt-3.5-turbo": "deepseek-ai/deepseek-coder-7b-instruct-v1.5",
+    "mistral":       "mistralai/Mistral-7B-Instruct-v0.3",
+    "phi3":          "microsoft/Phi-3-mini-128k-instruct",
+    "gemma":         "google/gemma-7b-it",
+    "mixtral":       "mistralai/Mixtral-8x7B-Instruct-v0.1",
+    "llama3-8b":     "meta-llama/Meta-Llama-3-8B-Instruct"
 }
 
-# MongoDB setup
-MONGO_URI = "mongodb://localhost:27017"
-client = MongoClient(MONGO_URI)
-db = client.deepseek_db
-conversations_collection = db.conversations
+# ─── Request schema for chat ──────────────────────────────────────────────────────────
+class ChatReq(BaseModel):
+    model: str
+    messages: List[Dict[str, str]]
+    temperature: float = 1.0
+    # allow up to 16 384 new tokens per request
+    max_tokens: int = 16_384
+    stream: bool = False
 
-def save_conversation(user_id, conversation):
-    conversations_collection.update_one(
-        {"user_id": user_id},
-        {"$set": {"conversation": conversation}},
-        upsert=True
-    )
-
-def load_conversation(user_id):
-    user_data = conversations_collection.find_one({"user_id": user_id})
-    return user_data["conversation"] if user_data else []
 
 def create_app():
-    model_name = os.environ.get("MODEL_NAME", "deepseek")
-    if model_name not in MODELS:
-        raise ValueError(f"Model '{model_name}' not available. Choose from: {', '.join(MODELS.keys())}")
-    MODEL_ID = MODELS[model_name]
+    # Select model
+    model_key = os.getenv("MODEL_NAME", "deepseek")
+    if model_key not in MODELS:
+        raise HTTPException(status_code=400, detail=f"Unknown model: {model_key}")
+    model_id = MODELS[model_key]
 
-    print(f"🚀 Loading model '{model_name}' from '{MODEL_ID}'...")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+    # Load tokenizer and model
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_ID,
+        model_id,
         torch_dtype=torch.float16,
-        device_map={"": 0}  # ✅ Force full model to GPU 0
+        device_map={"": 0}
     )
-    print("✅ Model loaded successfully!")
 
     app = FastAPI()
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
-    class RequestBody(BaseModel):
-        user_id: str
-        message: str
-        max_tokens: int = 100
-
-    @app.post("/generate")
-    async def generate_text(request: Request):
-        try:
-            body = await request.json()
-            print("✅ Received JSON:", body)
-        except Exception as e:
-            print("❌ Failed to parse JSON:", e)
-            return JSONResponse(status_code=400, content={"error": "Invalid JSON format", "details": str(e)})
-
-        try:
-            req = RequestBody(**body)
-        except Exception as e:
-            print("❌ Schema validation failed:", e)
-            return JSONResponse(status_code=422, content={"error": "Validation error", "details": str(e)})
-
-        user_id = req.user_id
-        conversation_history = load_conversation(user_id)
-        conversation_history.append(f"User: {req.message}")
-        conversation_history = conversation_history[-10:]
-        context = "\n".join(conversation_history) + "\nAssistant:"
-        print(f"🧠 Full context for user '{user_id}':\n{context}\n")
-
-        total_start = time.time()
-        inputs = tokenizer(context, return_tensors="pt").to(model.device)
-
-        if inputs["input_ids"].shape[1] > 2048:
-            inputs["input_ids"] = inputs["input_ids"][:, -2048:]
-            if "attention_mask" in inputs:
-                inputs["attention_mask"] = inputs["attention_mask"][:, -2048:]
-            print("⚠️ Input truncated to 2048 tokens.")
-
-        model_start = time.time()
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs,
-                max_new_tokens=req.max_tokens,
-                temperature=0.7,
-                top_p=0.9
-            )
-        model_end = time.time()
-
-        response_text = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        total_end = time.time()
-
-        print(f"✅ Response generated in {model_end - model_start:.2f}s (Total: {total_end - total_start:.2f}s)")
-        print(f"🗣️ Assistant:\n{response_text.strip()}\n")
-
-        conversation_history.append(f"Assistant: {response_text}")
-        save_conversation(user_id, conversation_history)
-
-        return {
-            "response": response_text,
-            "timing": {
-                "model_inference_time": model_end - model_start,
-                "total_request_time": total_end - total_start
-            }
-        }
+    # ─── Logging middleware ──────────────────────────────────────────────────────────
+    @app.middleware("http")
+    async def log_requests(request: Request, call_next):
+        body = await request.body()
+        print(f"➡️ {request.method} {request.url.path} — body={body!r}")
+        response = await call_next(request)
+        print(f"⬅️ {request.method} {request.url.path} — status={response.status_code}")
+        return response
 
     @app.get("/")
-    def home():
-        return {"message": f"{model_name} Model Server is Running with CUDA and MongoDB!"}
+    async def home():
+        return {"message": f"{model_key} server up"}
+
+    @app.get("/v1/models")
+    async def list_models_v1():
+        return {
+            "object": "list",
+            "data": [{"id": m, "object": "model", "owned_by": "local"} for m in MODELS]
+        }
+
+    @app.get("/v1/models/{model_id}")
+    async def get_model_v1(model_id: str):
+        if model_id not in MODELS:
+            return JSONResponse(status_code=404, content={"error": "Not found"})
+        return {"id": model_id, "object": "model", "owned_by": "local"}
+
+    @app.get("/models")
+    async def list_models_root():
+        return await list_models_v1()
+
+    @app.get("/models/{model_id}")
+    async def get_model_root(model_id: str):
+        return await get_model_v1(model_id)
+
+    @app.post("/v1/chat/completions")
+    async def chat_v1(req: ChatReq):
+        # Build prompt from messages
+        prompt = ""
+        for m in req.messages:
+            role = m.get("role", "user").capitalize()
+            content = m.get("content", "")
+            prompt += f"{role}: {content}\n"
+        prompt += "Assistant:"
+
+        # Tokenize and trim to model context
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        # use the model’s true context size, or fall back to 16 384
+        max_ctx = getattr(model.config, "max_position_embeddings", 16_384)
+        if inputs["input_ids"].shape[1] > max_ctx:
+            inputs["input_ids"] = inputs["input_ids"][..., -max_ctx:]
+            inputs["attention_mask"] = inputs["attention_mask"][..., -max_ctx:]
+
+        # Generate
+        with torch.no_grad():
+            out = model.generate(
+                **inputs,
+                max_new_tokens=req.max_tokens,
+                do_sample=(req.temperature > 0),
+                temperature=req.temperature if req.temperature > 0 else 1.0
+            )
+
+        # Decode only the new tokens
+        new_tokens = out[0][inputs["input_ids"].shape[1]:]
+        text = tokenizer.decode(new_tokens, skip_special_tokens=True)
+
+        # SSE streaming
+        if req.stream:
+            def event_stream() -> Generator[str, None, None]:
+                chunk = {
+                    "choices": [{
+                        "delta": {"content": text},
+                        "index": 0,
+                        "finish_reason": "stop"
+                    }]
+                }
+                yield f"data: {json.dumps(chunk)}\n\n"
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+        # Normal JSON response
+        return {
+            "id": "local-1",
+            "object": "chat.completion",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        }
+
+    @app.post("/chat/completions")
+    async def chat_root(req: ChatReq):
+        return await chat_v1(req)
 
     return app
 
-# Expose app for uvicorn
+# Create the ASGI app
 app = create_app()
+

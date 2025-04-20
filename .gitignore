@@ -6,3 +6,4 @@ server_debug.log
 *.egg-info/
 offload_weights/
 bitsandbytes/
+requirements.txt\npackage.sh

@@ -1,0 +1,8 @@
+# .gitignore
+venv/
+*.log
+*.pem
+server_debug.log
+*.egg-info/
+offload_weights/
+bitsandbytes/

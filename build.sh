@@ -9,16 +9,28 @@ if [ ! -d "venv" ]; then
   echo "📦 Creating virtual environment…"
   python3 -m venv venv
 fi
-# shellcheck disable=SC1091
 source venv/bin/activate
 
 # 2) Dependencies
 echo "📦 Installing/upgrading pip & core libraries…"
 pip install --upgrade pip
 pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
-for pkg in uvicorn fastapi transformers pymongo accelerate; do
+for pkg in uvicorn fastapi transformers pymongo accelerate bitsandbytes; do
   pip install --upgrade "$pkg"
 done
+
+# 2a) Build bitsandbytes for CUDA 12.8 if not already installed
+if ! python -c "import bitsandbytes" &>/dev/null; then
+  echo "🔧 Cloning bitsandbytes for CUDA build…"
+  git clone https://github.com/TimDettmers/bitsandbytes.git tmp_bnb
+  cd tmp_bnb
+  echo "🔨 Building bitsandbytes (CUDA_VERSION=128)…"
+  CUDA_VERSION=128 python setup.py install
+  cd ..
+  rm -rf tmp_bnb
+else
+  echo "✅ bitsandbytes already installed in venv"
+fi
 
 # 3) Check server.py
 if ! grep -qE '^app\s*=\s*create_app\(\)' server.py; then
@@ -39,7 +51,7 @@ fi
 echo "✅ MongoDB is running."
 
 # 5) Model selection
-MODEL_NAME="${1:-deepseek}"
+MODEL_NAME="${1:-deepseek-33b}"
 export MODEL_NAME
 echo "🚀 Using model: $MODEL_NAME"
 

@@ -21,7 +21,8 @@ MODELS = {
     "phi3":          "microsoft/Phi-3-mini-128k-instruct",
     "gemma":         "google/gemma-7b-it",
     "mixtral":       "mistralai/Mixtral-8x7B-Instruct-v0.1",
-    "llama3-8b":     "meta-llama/Meta-Llama-3-8B-Instruct"
+    "llama3-8b":     "meta-llama/Meta-Llama-3-8B-Instruct",
+    "deepseek-33b":  "deepseek-ai/deepseek-coder-33b-instruct"
 }
 
 # ─── Request schema for chat ──────────────────────────────────────────────────────────
@@ -29,25 +30,48 @@ class ChatReq(BaseModel):
     model: str
     messages: List[Dict[str, str]]
     temperature: float = 1.0
-    # allow up to 16 384 new tokens per request
     max_tokens: int = 16_384
     stream: bool = False
 
 
 def create_app():
-    # Select model
-    model_key = os.getenv("MODEL_NAME", "deepseek")
+    # Default model key
+    model_key = os.getenv("MODEL_NAME", "deepseek-33b")
     if model_key not in MODELS:
         raise HTTPException(status_code=400, detail=f"Unknown model: {model_key}")
     model_id = MODELS[model_key]
 
-    # Load tokenizer and model
+    # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(model_id)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        torch_dtype=torch.float16,
-        device_map={"": 0}
-    )
+
+    # Try 4-bit quantization first
+    try:
+        from transformers import BitsAndBytesConfig
+        quant_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.float16
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            quantization_config=quant_config,
+            device_map="auto",
+            offload_folder="offload",
+            offload_state_dict=True,
+            low_cpu_mem_usage=True
+        )
+        print("Loaded model with 4-bit quantization via bitsandbytes.")
+    except Exception as e:
+        # If quantization fails, fallback to FP16 with automatic CPU offloading
+        print(f"Quantization failed ({e}), falling back to FP16 auto offload...")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_id,
+            torch_dtype=torch.float16,
+            device_map="auto",
+            offload_folder="offload",
+            offload_state_dict=True,
+            low_cpu_mem_usage=True
+        )
 
     app = FastAPI()
     app.add_middleware(
@@ -57,7 +81,6 @@ def create_app():
         allow_headers=["*"],
     )
 
-    # ─── Logging middleware ──────────────────────────────────────────────────────────
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
         body = await request.body()
@@ -72,10 +95,7 @@ def create_app():
 
     @app.get("/v1/models")
     async def list_models_v1():
-        return {
-            "object": "list",
-            "data": [{"id": m, "object": "model", "owned_by": "local"} for m in MODELS]
-        }
+        return {"object": "list", "data": [{"id": m, "object": "model", "owned_by": "local"} for m in MODELS]}
 
     @app.get("/v1/models/{model_id}")
     async def get_model_v1(model_id: str):
@@ -93,17 +113,11 @@ def create_app():
 
     @app.post("/v1/chat/completions")
     async def chat_v1(req: ChatReq):
-        # Build prompt from messages
-        prompt = ""
-        for m in req.messages:
-            role = m.get("role", "user").capitalize()
-            content = m.get("content", "")
-            prompt += f"{role}: {content}\n"
-        prompt += "Assistant:"
-
-        # Tokenize and trim to model context
+        # Build prompt
+        prompt = "".join(f"{m.get('role','user').capitalize()}: {m.get('content','')}\n" for m in req.messages) + "Assistant:"
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-        # use the model’s true context size, or fall back to 16 384
+
+        # Trim to max context
         max_ctx = getattr(model.config, "max_position_embeddings", 16_384)
         if inputs["input_ids"].shape[1] > max_ctx:
             inputs["input_ids"] = inputs["input_ids"][..., -max_ctx:]
@@ -114,39 +128,23 @@ def create_app():
             out = model.generate(
                 **inputs,
                 max_new_tokens=req.max_tokens,
-                do_sample=(req.temperature > 0),
-                temperature=req.temperature if req.temperature > 0 else 1.0
+                do_sample=(req.temperature>0),
+                temperature=req.temperature or 1.0
             )
 
-        # Decode only the new tokens
+        # Decode
         new_tokens = out[0][inputs["input_ids"].shape[1]:]
         text = tokenizer.decode(new_tokens, skip_special_tokens=True)
 
-        # SSE streaming
+        # Stream or normal response
         if req.stream:
-            def event_stream() -> Generator[str, None, None]:
-                chunk = {
-                    "choices": [{
-                        "delta": {"content": text},
-                        "index": 0,
-                        "finish_reason": "stop"
-                    }]
-                }
+            def event_stream():
+                chunk = {"choices":[{"delta":{"content":text},"index":0,"finish_reason":"stop"}]}
                 yield f"data: {json.dumps(chunk)}\n\n"
                 yield "data: [DONE]\n\n"
             return StreamingResponse(event_stream(), media_type="text/event-stream")
 
-        # Normal JSON response
-        return {
-            "id": "local-1",
-            "object": "chat.completion",
-            "choices": [{
-                "index": 0,
-                "message": {"role": "assistant", "content": text},
-                "finish_reason": "stop"
-            }],
-            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        }
+        return {"id":"local-1","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":text},"finish_reason":"stop"}],"usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}}
 
     @app.post("/chat/completions")
     async def chat_root(req: ChatReq):
@@ -154,6 +152,7 @@ def create_app():
 
     return app
 
-# Create the ASGI app
+
+# Instantiate app
 app = create_app()
 

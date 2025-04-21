@@ -6,6 +6,7 @@ import sys
 import json
 import logging
 from typing import List, Dict
+from datetime import datetime
 
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -13,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import torch
 from transformers import AutoTokenizer, AutoModelForCausalLM
+from pymongo import MongoClient
 
 # ─── Logging setup ───────────────────────────────────────────────────────────────
 logger = logging.getLogger(__name__)
@@ -44,8 +46,13 @@ class ChatReq(BaseModel):
     max_tokens: int = 16_384
     stream: bool = False
 
-
 def create_app():
+    # Connect to MongoDB for logging truncated context
+    mongo_uri = os.getenv("MONGODB_URI", "mongodb://localhost:27017")
+    client = MongoClient(mongo_uri)
+    db = client["chat_logs"]
+    truncated_coll = db["truncated_context"]
+
     # Default model key
     model_key = os.getenv("MODEL_NAME", "deepseek-33b")
     if model_key not in MODELS:
@@ -122,6 +129,31 @@ def create_app():
     async def home():
         return {"message": f"{model_key} server up"}
 
+    @app.get("/v1/models")
+    async def list_models_v1():
+        return {"object": "list", "data": [{"id": m, "object": "model", "owned_by": "local"} for m in MODELS]}
+
+    @app.get("/v1/models/{model_id}")
+    async def get_model_v1(model_id: str):
+        if model_id not in MODELS:
+            return JSONResponse(status_code=404, content={"error": "Not found"})
+        return {"id": model_id, "object": "model", "owned_by": "local"}
+
+    @app.get("/models")
+    async def list_models_root():
+        return await list_models_v1()
+
+    @app.get("/models/{model_id}")
+    async def get_model_root(model_id: str):
+        return await get_model_v1(model_id)
+
+    @app.get("/v1/truncated/{conversation_id}")
+    async def get_truncated(conversation_id: str):
+        docs = list(truncated_coll.find({"conversation_id": conversation_id}).sort("timestamp", 1))
+        for d in docs:
+            d["_id"] = str(d["_id"])
+        return {"dropped_context": docs}
+
     @app.post("/v1/chat/completions")
     async def chat_v1(req: ChatReq):
         # Build prompt
@@ -140,18 +172,29 @@ def create_app():
         # Truncate if needed
         if orig_len > input_limit:
             to_trunc = orig_len - input_limit
+            # Record truncated tokens
+            full_ids = inputs["input_ids"][0].tolist()
+            dropped_ids = full_ids[:to_trunc]
+            dropped_text = tokenizer.decode(dropped_ids, skip_special_tokens=False)
+            truncated_coll.insert_one({
+                "conversation_id": req.messages[0].get("conversation_id"),
+                "timestamp": datetime.utcnow(),
+                "model": model_key,
+                "dropped_token_ids": dropped_ids,
+                "dropped_text": dropped_text
+            })
+            # Perform truncation
             inputs["input_ids"] = inputs["input_ids"][..., -input_limit:]
             inputs["attention_mask"] = inputs["attention_mask"][..., -input_limit:]
             logger.warning(f"Truncated {to_trunc} tokens; kept last {input_limit}")
-            # Show last 10 tokens
+            # Show last tokens snippet
             last_ids = inputs["input_ids"][0, -10:].tolist()
             snippet = tokenizer.decode(inputs["input_ids"][0, -10:], skip_special_tokens=False)
             logger.debug(f"Last 10 token IDs: {last_ids}")
             logger.debug(f"Last 10 tokens snippet: {snippet!r}")
-            # Reset orig_len after truncation
             orig_len = input_limit
 
-        # Always ensure generation does not exceed model context
+        # Ensure generation headroom
         available = max_ctx - orig_len
         if available <= 0:
             logger.error(f"No tokens available for generation: orig_len={orig_len}, max_ctx={max_ctx}")
@@ -168,14 +211,18 @@ def create_app():
                 temperature=req.temperature or 1.0
             )
 
-        # Compute token usage
-        seq = out[0] if out.ndim == 2 else out
-        total_len = seq.shape[0]
-        gen_tokens = total_len - inputs["input_ids"].shape[1]
+        # Compute token usage with shape handling
+        if isinstance(out, torch.Tensor) and out.ndim == 2:
+            total_len = out.shape[1]
+            seq = out[0]
+        else:
+            seq = out if isinstance(out, torch.Tensor) else torch.tensor(out)
+            total_len = seq.shape[0]
+        gen_tokens = total_len - orig_len
         logger.debug(f"Generated tokens: {gen_tokens}, total sequence length: {total_len}")
 
         # Decode
-        text = tokenizer.decode(seq[inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+        text = tokenizer.decode(seq[orig_len:], skip_special_tokens=True)
 
         if req.stream:
             def event_stream():
@@ -199,4 +246,3 @@ def create_app():
 
 # Instantiate app
 app = create_app()
-

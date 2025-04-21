@@ -92,7 +92,7 @@ def create_app():
             low_cpu_mem_usage=True
         )
 
-    # Verify context window
+    # Verify and log context window
     max_ctx = getattr(model.config, "max_position_embeddings", None)
     if not max_ctx or max_ctx < 1:
         raise RuntimeError("Invalid model.config.max_position_embeddings")
@@ -132,7 +132,7 @@ def create_app():
         orig_len = inputs["input_ids"].shape[1]
         logger.debug(f"Original input token length: {orig_len}")
 
-        # Reserve tokens for response
+        # Reserve headroom
         reserved = 512
         input_limit = max_ctx - reserved
         logger.debug(f"Input limit (max_ctx {max_ctx} - reserved {reserved}) = {input_limit}")
@@ -143,16 +143,21 @@ def create_app():
             inputs["input_ids"] = inputs["input_ids"][..., -input_limit:]
             inputs["attention_mask"] = inputs["attention_mask"][..., -input_limit:]
             logger.warning(f"Truncated {to_trunc} tokens; kept last {input_limit}")
-            # Show snippet of kept tokens
+            # Show last 10 tokens
             last_ids = inputs["input_ids"][0, -10:].tolist()
             snippet = tokenizer.decode(inputs["input_ids"][0, -10:], skip_special_tokens=False)
             logger.debug(f"Last 10 token IDs: {last_ids}")
             logger.debug(f"Last 10 tokens snippet: {snippet!r}")
-            max_gen = min(reserved, req.max_tokens)
-        else:
-            max_gen = req.max_tokens
+            # Reset orig_len after truncation
+            orig_len = input_limit
 
-        logger.debug(f"Generating up to {max_gen} new tokens")
+        # Always ensure generation does not exceed model context
+        available = max_ctx - orig_len
+        if available <= 0:
+            logger.error(f"No tokens available for generation: orig_len={orig_len}, max_ctx={max_ctx}")
+            raise HTTPException(status_code=400, detail="Input too long to generate any tokens")
+        max_gen = min(req.max_tokens, available)
+        logger.debug(f"Generating up to {max_gen} new tokens (available headroom: {available})")
 
         # Generate
         with torch.no_grad():

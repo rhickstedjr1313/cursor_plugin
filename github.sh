@@ -4,9 +4,9 @@ set -euo pipefail
 # ─── CONFIG ───────────────────────────────────────────────────────────
 GH_USER="rhickstedjr1313"
 REPO="cursor_plugin"
-VISIBILITY="public"        # use “private” if you want a private repo
+VISIBILITY="private"        # use “private” if you want a private repo
 # You must export a GitHub token with repo‑creation rights:
-#   export GITHUB_TOKEN="ghp_…"
+export GITHUB_TOKEN="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"
 # ──────────────────────────────────────────────────────────────────────
 
 if [ -z "${GITHUB_TOKEN-}" ]; then

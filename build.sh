@@ -4,6 +4,17 @@ IFS=$'\n\t'
 
 echo "🚀 Starting build process for AchievAI Server (HTTP only)..."
 
+# 0) RAM disk offload + cache setup
+RAMDISK_DIR="/mnt/ramdisk"
+HF_CACHE="$RAMDISK_DIR/huggingface"
+OFFLOAD_DIR="$RAMDISK_DIR/offload"
+mkdir -p "$HF_CACHE" "$OFFLOAD_DIR"
+echo "🧠 Using RAM disk for HuggingFace cache: $HF_CACHE"
+echo "📦 Offload folder set to: $OFFLOAD_DIR"
+export HF_HOME="$HF_CACHE"
+export TRANSFORMERS_CACHE="$HF_CACHE"
+export HF_DATASETS_CACHE="$HF_CACHE"
+
 # 1) venv & activate
 if [ ! -d "venv" ]; then
   echo "📦 Creating virtual environment…"
@@ -55,7 +66,11 @@ MODEL_NAME="${1:-deepseek-33b}"
 export MODEL_NAME
 echo "🚀 Using model: $MODEL_NAME"
 
-# 6) Launch HTTP only
+# 6) RAM disk offload + model caching hint
+echo "🧠 Hint: Model weights will now be cached in $HF_CACHE"
+echo "💾 If you're using offloading, set your server.py config to use: $OFFLOAD_DIR"
+
+# 7) Launch HTTP only
 echo "🎧 Launching HTTP Uvicorn on port 8000…"
 uvicorn server:app \
   --host 0.0.0.0 --port 8000 --reload

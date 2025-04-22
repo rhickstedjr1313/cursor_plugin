@@ -73,7 +73,7 @@ def create_app():
                 model_id,
                 quantization_config=quant_config,
                 device_map="auto",
-                offload_folder="offload",
+                offload_folder="/mnt/ramdisk/offload",
                 offload_state_dict=True,
                 low_cpu_mem_usage=True
             )
@@ -84,7 +84,7 @@ def create_app():
                 model_id,
                 torch_dtype=torch.float16,
                 device_map="auto",
-                offload_folder="offload",
+                offload_folder="/mnt/ramdisk/offload",
                 offload_state_dict=True,
                 low_cpu_mem_usage=True
             )
@@ -94,7 +94,7 @@ def create_app():
             model_id,
             torch_dtype=torch.float16,
             device_map="auto",
-            offload_folder="offload",
+            offload_folder="/mnt/ramdisk/offload",
             offload_state_dict=True,
             low_cpu_mem_usage=True
         )

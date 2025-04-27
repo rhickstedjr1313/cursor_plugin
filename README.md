@@ -1,138 +1,90 @@
 # Cursor Deepseek Plugin
 
-A FastAPI-based “Cursor” plugin that serves Deepseek code-generation models (7B and 33B) on an external Linux box with GPU and high-RAM CPU offload.
+A Cursor plugin for integrating Deepseek 7B/33B models on an external Linux server.
 
-## 🚀 Features
+## Overview
 
-- **Dual‐mode model support**
-  - **deepseek-7b**: full FP16 on GPU
-  - **deepseek-33b**: 4-bit quantization via BitsAndBytes with FP16 compute and CPU offload (fallback to FP16 offload if needed)
-- **High throughput**
-  - Configured to use 32 CPU threads
-  - Large `max_tokens` default (100 000) for long contexts
-- **RAM‐disk offload**
-  - Offloading intermediate tensors to a fast in-memory `tmpfs`
-- **MongoDB logging**
-  - Truncated context is logged for debugging
+This plugin allows Cursor to send chat/completion requests to a FastAPI server running Deepseek models (7B in FP16 or 33B in 4‑bit + FP16 compute with CPU offload) hosted on an external Linux box.
 
-## 🛠️ Prerequisites
+## Supported Models
 
-- **Linux** server with:
-  - NVIDIA GPU (≥ 32 GB VRAM recommended)
-  - ≥ 192 GB system RAM (for large contexts & offload)
-- **Python 3.10+**
-- **MongoDB** running locally or remotely
-- **CUDA Toolkit 12.8** (for BitsAndBytes builds)
+- **Deepseek 7B (FP16)**  
+  Hugging Face ID: `deepseek-ai/deepseek-coder-7b-instruct-v1.5`
+- **Deepseek 33B (4‑bit + FP16 compute + CPU offload)**  
+  Hugging Face ID: `deepseek-ai/deepseek-coder-33b-instruct`
 
-## 📦 Installation
+## Requirements
 
-1. **Clone this repo**
+- Linux server with:
+  - NVIDIA GPU (32 GB or larger)
+  - At least 64 GB RAM (configurable RAM disk)
+  - CUDA 12.8
+- Python 3.11+
+- Git
+- `venv` or `virtualenv`
+- Port 8000 accessible externally
+
+## Installation
+
+1. **Clone the repository**  
    ```bash
-   git clone https://github.com/your-org/cursor-deepseek-plugin.git
+   git clone https://github.com/yourusername/cursor-deepseek-plugin.git
    cd cursor-deepseek-plugin
    ```
 
-2. **Set up a Python virtual environment**
+2. **Setup virtual environment & install dependencies**  
    ```bash
-   ./build.sh [MODEL_NAME]
+   python3 -m venv venv
+   source venv/bin/activate
+   pip install --upgrade pip
+   pip install -r requirements.txt
    ```
-   - By default `MODEL_NAME=deepseek-33b`. You can override:
-     ```bash
-     ./build.sh deepseek
-     ```
 
-3. **(Optional) Create a RAM‐disk** for offload files
+3. **Build bitsandbytes (if needed)**  
    ```bash
-   sudo mkdir -p /mnt/ramdisk
+   ./build.sh
+   ```
+
+## Configuration
+
+1. **Environment Variables**  
+   - `MODEL_NAME`: Choose between `deepseek` (7B) or `deepseek-33b`  
+   - `MONGODB_URI`: MongoDB connection string for logging (default: `mongodb://localhost:27017`)
+
+2. **RAM Disk for Offloading**  
+   By default, offload state dicts to `/mnt/ramdisk/offload`.  
+   Ensure you have a RAM disk mounted:
+   ```bash
    sudo mount -t tmpfs -o size=64G tmpfs /mnt/ramdisk
    ```
-   Adjust `size=` up to your available RAM (e.g. `size=96G`).
 
-4. **Configure environment variables**
-   ```bash
-   export MONGODB_URI="mongodb://localhost:27017"
-   export MODEL_NAME="deepseek-33b"
-   ```
+3. **Expose Server Externally**  
+   - **Find External IP**:  
+     ```bash
+     curl ifconfig.me
+     ```
+   - **Port Forwarding**:  
+     On your router, forward external port **8000** to the server’s local IP on port **8000**.
 
-## ⚙️ Configuration
-
-All options are in `server.py` or via env vars:
-
-| Setting                    | Env var       | Default                |
-|----------------------------|---------------|------------------------|
-| Model to load              | `MODEL_NAME`  | `deepseek-33b`         |
-| MongoDB URI                | `MONGODB_URI` | `mongodb://localhost:27017` |
-| Offload folder             | —             | `/mnt/ramdisk/offload` |
-| CPU threads                | —             | `torch.set_num_threads(32)` |
-| Default max tokens per req | —             | `100_000`              |
-
-## 🚨 Running the Server
+## Running the Server
 
 ```bash
-uvicorn server:app   --host 0.0.0.0 --port 8000 --reload
+source venv/bin/activate
+MODEL_NAME=deepseek-33b uvicorn server:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-On startup you’ll see logs like:
+## Cursor Integration
+
+In your Cursor settings, point the AI endpoint to:
 
 ```
-Loaded deepseek-33b with 4-bit quantization via bitsandbytes.
-deepseek-33b context window = 32768 tokens
+http://<YOUR_EXTERNAL_IP>:8000/v1/chat/completions
 ```
 
-## 📝 API Reference
+## Usage
 
-### GET /v1/models
+Use your Cursor interface to interact with the Deepseek models as usual. Ensure `MODEL_NAME` is set appropriately per session.
 
-List available models.
+## License
 
-### GET /v1/models/{model_id}
-
-Details for a specific model.
-
-### POST /v1/chat/completions
-
-Request schema:
-```json
-{
-  "model": "deepseek-33b",
-  "messages": [
-    { "role": "user", "content": "Hello, world!" }
-  ],
-  "temperature": 0.7,
-  "max_tokens": 1000,
-  "stream": false
-}
-```
-
-Response:
-```json
-{
-  "id":"local-1",
-  "object":"chat.completion",
-  "choices":[
-    {
-      "index":0,
-      "message":{"role":"assistant","content":"Hi there!"},
-      "finish_reason":"stop"
-    }
-  ],
-  "usage":{
-    "prompt_tokens":5,
-    "completion_tokens":4,
-    "total_tokens":9
-  }
-}
-```
-
-If you set `"stream": true`, the server will send an SSE stream of partial tokens.
-
-## 🙏 Contributing
-
-1. Fork & clone  
-2. Create a feature branch  
-3. Submit a PR against `main`  
-4. Ensure linting, formatting, and tests pass
-
-## 📄 License
-
-Released under the MIT License.
+MIT License

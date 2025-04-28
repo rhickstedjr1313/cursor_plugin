@@ -118,11 +118,14 @@ def create_app():
 
     @app.middleware("http")
     async def verify_api_key(request: Request, call_next):
-        provided = request.headers.get("Authorization")
-        if provided != API_KEY:
-            return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+        # only protect chat endpoints
+        if request.url.path.startswith("/v1/chat") or request.url.path.startswith("/chat"):
+            key = request.headers.get("x-api-key")
+            if key != API_KEY:
+                return JSONResponse(status_code=401, content={"error": "Unauthorized"})
         return await call_next(request)
 
+    # ─── Request logging ────────────────────────────────────────────────────────────
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
         body = await request.body()
@@ -167,7 +170,8 @@ def create_app():
     @app.post("/v1/chat/completions")
     async def chat_v1(req: ChatReq):
         # Build prompt
-        prompt = "".join(f"{m.get('role','user').capitalize()}: {m.get('content','')}\n" for m in req.messages) + "Assistant:"
+        prompt = "".join(f"{m.get('role','user').capitalize()}: {m.get('content','')}\n"
+                         for m in req.messages) + "Assistant:"
         inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
         # Debug original length
@@ -256,3 +260,4 @@ def create_app():
 
 # Instantiate app
 app = create_app()
+

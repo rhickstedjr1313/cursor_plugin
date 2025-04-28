@@ -6,7 +6,7 @@ GH_USER="rhickstedjr1313"
 REPO="cursor_plugin"
 VISIBILITY="private"        # use “private” if you want a private repo
 # You must export a GitHub token with repo‑creation rights:
-export GITHUB_TOKEN="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"
+export GITHUB_TOKEN="<Your Token>"
 # ──────────────────────────────────────────────────────────────────────
 
 if [ -z "${GITHUB_TOKEN-}" ]; then

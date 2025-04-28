@@ -113,6 +113,16 @@ def create_app():
         allow_headers=["*"],
     )
 
+    # ─── API-Key Verification ───────────────────────────────────────────────────────
+    API_KEY = os.getenv("API_KEY", "LetMeIn")
+
+    @app.middleware("http")
+    async def verify_api_key(request: Request, call_next):
+        provided = request.headers.get("Authorization")
+        if provided != API_KEY:
+            return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+        return await call_next(request)
+
     @app.middleware("http")
     async def log_requests(request: Request, call_next):
         body = await request.body()

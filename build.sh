@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+#
+export OPENAI_API_KEY=LetMeIn
+
 set -euo pipefail
 IFS=$'\n\t'
 

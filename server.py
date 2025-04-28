@@ -120,8 +120,13 @@ def create_app():
     async def verify_api_key(request: Request, call_next):
         # only protect chat endpoints
         if request.url.path.startswith("/v1/chat") or request.url.path.startswith("/chat"):
-            key = request.headers.get("x-api-key")
-            if key != API_KEY:
+            auth = request.headers.get("Authorization", "")
+            # support both “LetMeIn” and “Bearer LetMeIn”
+            if auth.lower().startswith("bearer "):
+                token = auth[7:]
+            else:
+                token = auth
+            if token != API_KEY:
                 return JSONResponse(status_code=401, content={"error": "Unauthorized"})
         return await call_next(request)
 
@@ -260,4 +265,3 @@ def create_app():
 
 # Instantiate app
 app = create_app()
-
